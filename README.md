@@ -278,3 +278,4 @@ MIT &copy; 2026 Paperclip
 <p align="center">
   <sub>Open source under MIT. Built for people who want to run companies, not babysit agents.</sub>
 </p>
+# Railway deployment branch
