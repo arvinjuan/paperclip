@@ -27,7 +27,7 @@ RUN pnpm --filter @paperclip/server build
 FROM base AS production
 WORKDIR /app
 COPY --from=build /app /app
-RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest
+RUN mkdir -p /paperclip
 
 ENV NODE_ENV=production \
   HOME=/paperclip \
@@ -40,7 +40,6 @@ ENV NODE_ENV=production \
   PAPERCLIP_DEPLOYMENT_MODE=local_trusted \
   PAPERCLIP_DEPLOYMENT_EXPOSURE=private
 
-VOLUME ["/paperclip"]
 EXPOSE 3100
 
 CMD ["node", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]
