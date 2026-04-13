@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { isOpenCodeUnknownSessionError, parseOpenCodeJsonl } from "@paperclipai/adapter-opencode-local/server";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { execute, isOpenCodeUnknownSessionError, parseOpenCodeJsonl } from "@paperclipai/adapter-opencode-local/server";
 import { parseOpenCodeStdoutLine } from "@paperclipai/adapter-opencode-local/ui";
 import { printOpenCodeStreamEvent } from "@paperclipai/adapter-opencode-local/cli";
 
@@ -42,9 +45,133 @@ describe("opencode_local parser", () => {
       inputTokens: 150,
       cachedInputTokens: 30,
       outputTokens: 65,
+      reasoningOutputTokens: 0,
     });
     expect(parsed.costUsd).toBeCloseTo(0.003, 6);
     expect(parsed.errorMessage).toBe("model access denied");
+  });
+});
+
+describe("opencode_local execute", () => {
+  it("estimates OpenRouter cost from current model pricing when OpenCode omits cost", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-pricing-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "opencode");
+    await fs.mkdir(workspace, { recursive: true });
+    await fs.writeFile(
+      commandPath,
+      [
+        "#!/usr/bin/env node",
+        "console.log(JSON.stringify({ type: 'step_finish', sessionID: 'ses_pricing', part: { tokens: { input: 1000000, output: 1000000, reasoning: 1000000, cache: { read: 1000000, write: 0 } } } }));",
+        "process.exit(0);",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.chmod(commandPath, 0o755);
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = root;
+
+    try {
+      const result = await execute({
+        runId: "run-pricing",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "OpenCode Agent",
+          adapterType: "opencode_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          model: "openrouter/xiaomi/mimo-v2-flash",
+        },
+        context: {},
+        onLog: async () => {},
+      });
+
+      expect(result.costUsd).toBeCloseTo(0.715, 6);
+      expect(result.usage).toEqual({
+        inputTokens: 1000000,
+        outputTokens: 1000000,
+        reasoningOutputTokens: 1000000,
+        cachedInputTokens: 1000000,
+      });
+    } finally {
+      if (previousHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = previousHome;
+      }
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats structured OpenCode error events as failed even when the CLI exits 0", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-execute-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "opencode");
+    await fs.mkdir(workspace, { recursive: true });
+    await fs.writeFile(
+      commandPath,
+      [
+        "#!/usr/bin/env node",
+        "console.log(JSON.stringify({ type: 'step_start', sessionID: 'ses_402' }));",
+        "console.log(JSON.stringify({ type: 'error', message: { message: 'OpenRouter 402 Insufficient credits' } }));",
+        "process.exit(0);",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.chmod(commandPath, 0o755);
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = root;
+
+    try {
+      const result = await execute({
+        runId: "run-402",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "OpenCode Agent",
+          adapterType: "opencode_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          model: "openrouter/xiaomi/mimo-v2-flash",
+        },
+        context: {},
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.errorMessage).toBe("OpenRouter 402 Insufficient credits");
+      expect(result.sessionId).toBe("ses_402");
+    } finally {
+      if (previousHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = previousHome;
+      }
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 });
 

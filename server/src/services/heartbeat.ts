@@ -7,6 +7,7 @@ import {
   agentRuntimeState,
   agentTaskSessions,
   agentWakeupRequests,
+  companies,
   heartbeatRunEvents,
   heartbeatRuns,
   costEvents,
@@ -956,9 +957,10 @@ export function heartbeatService(db: Db) {
     const usage = result.usage;
     const inputTokens = usage?.inputTokens ?? 0;
     const outputTokens = usage?.outputTokens ?? 0;
+    const reasoningOutputTokens = usage?.reasoningOutputTokens ?? 0;
     const cachedInputTokens = usage?.cachedInputTokens ?? 0;
     const additionalCostCents = Math.max(0, Math.round((result.costUsd ?? 0) * 100));
-    const hasTokenUsage = inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0;
+    const hasTokenUsage = inputTokens > 0 || outputTokens > 0 || reasoningOutputTokens > 0 || cachedInputTokens > 0;
 
     await db
       .update(agentRuntimeState)
@@ -983,20 +985,42 @@ export function heartbeatService(db: Db) {
         provider: result.provider ?? "unknown",
         model: result.model ?? "unknown",
         inputTokens,
-        outputTokens,
+        outputTokens: outputTokens + reasoningOutputTokens,
         costCents: additionalCostCents,
         occurredAt: new Date(),
       });
     }
 
     if (additionalCostCents > 0) {
-      await db
+      const [updatedAgent] = await db
         .update(agents)
         .set({
           spentMonthlyCents: sql`${agents.spentMonthlyCents} + ${additionalCostCents}`,
           updatedAt: new Date(),
         })
-        .where(eq(agents.id, agent.id));
+        .where(eq(agents.id, agent.id))
+        .returning();
+
+      await db
+        .update(companies)
+        .set({
+          spentMonthlyCents: sql`${companies.spentMonthlyCents} + ${additionalCostCents}`,
+          updatedAt: new Date(),
+        })
+        .where(eq(companies.id, agent.companyId));
+
+      if (
+        updatedAgent &&
+        updatedAgent.budgetMonthlyCents > 0 &&
+        updatedAgent.spentMonthlyCents >= updatedAgent.budgetMonthlyCents &&
+        updatedAgent.status !== "paused" &&
+        updatedAgent.status !== "terminated"
+      ) {
+        await db
+          .update(agents)
+          .set({ status: "paused", updatedAt: new Date() })
+          .where(eq(agents.id, updatedAgent.id));
+      }
     }
   }
 

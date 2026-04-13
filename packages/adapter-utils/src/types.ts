@@ -28,6 +28,7 @@ export interface UsageSummary {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens?: number;
+  reasoningOutputTokens?: number;
 }
 
 export type AdapterBillingType = "api" | "subscription" | "unknown";

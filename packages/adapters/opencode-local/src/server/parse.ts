@@ -21,6 +21,7 @@ export function parseOpenCodeJsonl(stdout: string) {
     inputTokens: 0,
     cachedInputTokens: 0,
     outputTokens: 0,
+    reasoningOutputTokens: 0,
   };
 
   for (const rawLine of stdout.split(/\r?\n/)) {
@@ -49,6 +50,7 @@ export function parseOpenCodeJsonl(stdout: string) {
       usage.inputTokens += asNumber(tokens.input, 0);
       usage.cachedInputTokens += asNumber(cache.read, 0);
       usage.outputTokens += asNumber(tokens.output, 0);
+      usage.reasoningOutputTokens += asNumber(tokens.reasoning, 0);
       totalCostUsd += asNumber(part.cost, 0);
       continue;
     }

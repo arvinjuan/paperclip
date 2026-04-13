@@ -70,6 +70,64 @@ type ProviderModelNotFoundDetails = {
   suggestions: string[];
 };
 
+type OpenRouterPricing = {
+  prompt: number;
+  completion: number;
+  inputCacheRead?: number;
+};
+
+const OPENROUTER_PRICING: Record<string, OpenRouterPricing> = {
+  // Source: https://openrouter.ai/api/v1/models, checked 2026-04-13.
+  "xiaomi/mimo-v2-pro": {
+    prompt: 0.000001,
+    completion: 0.000003,
+    inputCacheRead: 0.0000002,
+  },
+  "xiaomi/mimo-v2-flash": {
+    prompt: 0.00000009,
+    completion: 0.00000029,
+    inputCacheRead: 0.000000045,
+  },
+  "z-ai/glm-5": {
+    prompt: 0.00000072,
+    completion: 0.0000023,
+  },
+};
+
+function resolveOpenRouterModelId(model: string): string | null {
+  const prefix = "openrouter/";
+  if (!model.startsWith(prefix)) return null;
+  const modelId = model.slice(prefix.length).trim();
+  return modelId.length > 0 ? modelId : null;
+}
+
+function estimateOpenRouterCostUsd(input: {
+  model: string;
+  usage: {
+    inputTokens: number;
+    cachedInputTokens?: number;
+    outputTokens: number;
+    reasoningOutputTokens?: number;
+  };
+}): number | null {
+  const modelId = resolveOpenRouterModelId(input.model);
+  if (!modelId) return null;
+
+  const pricing = OPENROUTER_PRICING[modelId];
+  if (!pricing) return null;
+
+  const promptTokens = input.usage.inputTokens ?? 0;
+  const cachedInputTokens = input.usage.cachedInputTokens ?? 0;
+  const outputTokens = (input.usage.outputTokens ?? 0) + (input.usage.reasoningOutputTokens ?? 0);
+  const cacheReadPrice = pricing.inputCacheRead ?? pricing.prompt;
+  const cost =
+    promptTokens * pricing.prompt +
+    cachedInputTokens * cacheReadPrice +
+    outputTokens * pricing.completion;
+
+  return Number.isFinite(cost) && cost > 0 ? cost : null;
+}
+
 function parseProviderModelNotFoundDetails(
   stdout: string,
   stderr: string,
@@ -403,18 +461,27 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const parsedError = typeof attempt.parsed.errorMessage === "string" ? attempt.parsed.errorMessage.trim() : "";
     const stderrLine = firstNonEmptyLine(attempt.proc.stderr);
     const modelNotFound = parseProviderModelNotFoundDetails(attempt.proc.stdout, attempt.proc.stderr);
-    const fallbackErrorMessage = modelNotFound
+    const structuredErrorMessage = modelNotFound
       ? formatModelNotFoundError(model, providerFromModel, modelNotFound)
-      : parsedError ||
-        stderrLine ||
-        `OpenCode exited with code ${attempt.proc.exitCode ?? -1}`;
+      : parsedError;
+    const fallbackErrorMessage =
+      structuredErrorMessage ||
+      stderrLine ||
+      `OpenCode exited with code ${attempt.proc.exitCode ?? -1}`;
+    const exitedSuccessfully = (attempt.proc.exitCode ?? 0) === 0;
+    const costUsd =
+      attempt.parsed.costUsd ??
+      estimateOpenRouterCostUsd({
+        model,
+        usage: attempt.parsed.usage,
+      });
 
     return {
       exitCode: attempt.proc.exitCode,
       signal: attempt.proc.signal,
       timedOut: false,
       errorMessage:
-        (attempt.proc.exitCode ?? 0) === 0
+        exitedSuccessfully && !structuredErrorMessage
           ? null
           : fallbackErrorMessage,
       usage: attempt.parsed.usage,
@@ -424,7 +491,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       provider: providerFromModel,
       model,
       billingType,
-      costUsd: attempt.parsed.costUsd,
+      costUsd,
       resultJson: {
         stdout: attempt.proc.stdout,
         stderr: attempt.proc.stderr,
