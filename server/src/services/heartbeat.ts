@@ -7,7 +7,6 @@ import {
   agentRuntimeState,
   agentTaskSessions,
   agentWakeupRequests,
-  companies,
   heartbeatRunEvents,
   heartbeatRuns,
   costEvents,
@@ -24,6 +23,7 @@ import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { secretService } from "./secrets.js";
 import { resolveDefaultAgentWorkspaceDir } from "../home-paths.js";
+import { syncMonthlySpendCounters } from "./monthly-spend.js";
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = 1;
@@ -992,34 +992,22 @@ export function heartbeatService(db: Db) {
     }
 
     if (additionalCostCents > 0) {
-      const [updatedAgent] = await db
-        .update(agents)
-        .set({
-          spentMonthlyCents: sql`${agents.spentMonthlyCents} + ${additionalCostCents}`,
-          updatedAt: new Date(),
-        })
-        .where(eq(agents.id, agent.id))
-        .returning();
-
-      await db
-        .update(companies)
-        .set({
-          spentMonthlyCents: sql`${companies.spentMonthlyCents} + ${additionalCostCents}`,
-          updatedAt: new Date(),
-        })
-        .where(eq(companies.id, agent.companyId));
+      const monthlySpend = await syncMonthlySpendCounters(db, {
+        companyId: agent.companyId,
+        agentId: agent.id,
+      });
 
       if (
-        updatedAgent &&
-        updatedAgent.budgetMonthlyCents > 0 &&
-        updatedAgent.spentMonthlyCents >= updatedAgent.budgetMonthlyCents &&
-        updatedAgent.status !== "paused" &&
-        updatedAgent.status !== "terminated"
+        monthlySpend.updatedAgent &&
+        monthlySpend.updatedAgent.budgetMonthlyCents > 0 &&
+        monthlySpend.agentSpendCents >= monthlySpend.updatedAgent.budgetMonthlyCents &&
+        monthlySpend.updatedAgent.status !== "paused" &&
+        monthlySpend.updatedAgent.status !== "terminated"
       ) {
         await db
           .update(agents)
           .set({ status: "paused", updatedAt: new Date() })
-          .where(eq(agents.id, updatedAgent.id));
+          .where(eq(agents.id, monthlySpend.updatedAgent.id));
       }
     }
   }
