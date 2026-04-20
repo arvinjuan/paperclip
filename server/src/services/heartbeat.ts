@@ -95,6 +95,170 @@ function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
+function readFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function truncateReportText(value: string | null | undefined, maxLength = 4000) {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  if (trimmed.length <= maxLength) return trimmed;
+  return `${trimmed.slice(0, maxLength - 3)}...`;
+}
+
+function inferRunMateriality(input: {
+  status: string;
+  summary: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  stdoutExcerpt: string;
+  stderrExcerpt: string;
+}) {
+  if (input.status !== "succeeded") {
+    return {
+      materialWork: false,
+      noOpReason: null,
+    };
+  }
+
+  const text = `${input.summary ?? ""}\n${input.stdoutExcerpt}\n${input.stderrExcerpt}`.toLowerCase();
+  const materialPattern =
+    /\b(commit(?:ted)?|push(?:ed)?|pull request|pr #?\d+|file(?:s)? changed|modified|created|implemented|fixed|updated|added|deleted|deployed|tests? passed|validation passed)\b/i;
+  const noOpPattern =
+    /\b(no-op|noop|no material|no repository changes|no changes|nothing changed|nothing to do|heartbeat only|status check only|no useful work)\b/i;
+
+  if (materialPattern.test(text)) {
+    return {
+      materialWork: true,
+      noOpReason: null,
+    };
+  }
+
+  if (noOpPattern.test(text)) {
+    return {
+      materialWork: false,
+      noOpReason: "Agent reported no material work.",
+    };
+  }
+
+  if (input.inputTokens === 0 && input.outputTokens === 0 && !input.summary) {
+    return {
+      materialWork: false,
+      noOpReason: "Run completed without token usage or final summary.",
+    };
+  }
+
+  return {
+    materialWork: null,
+    noOpReason: "Material output was not explicit in the agent summary.",
+  };
+}
+
+function mergeResultJsonWithReport(input: {
+  resultJson: Record<string, unknown> | null | undefined;
+  summary: string | null;
+  completionReport: Record<string, unknown>;
+}) {
+  return {
+    ...(input.resultJson ?? {}),
+    ...(input.summary ? { summary: input.summary } : {}),
+    completionReport: input.completionReport,
+  };
+}
+
+function readCompletionReport(resultJson: Record<string, unknown> | null | undefined) {
+  const completionReport = parseObject(resultJson?.completionReport);
+  return Object.keys(completionReport).length > 0 ? completionReport : null;
+}
+
+function buildCompletionReport(input: {
+  agent: typeof agents.$inferSelect;
+  run: typeof heartbeatRuns.$inferSelect;
+  status: string;
+  outcome: "succeeded" | "failed" | "cancelled" | "timed_out";
+  finishedAt: Date;
+  adapterResult?: AdapterExecutionResult | null;
+  usageJson?: Record<string, unknown> | null;
+  stdoutExcerpt: string;
+  stderrExcerpt: string;
+  logSummary?: { bytes: number; sha256?: string; compressed: boolean } | null;
+  error?: string | null;
+}) {
+  const usage = input.adapterResult?.usage;
+  const inputTokens =
+    usage?.inputTokens ??
+    readFiniteNumber(input.usageJson?.inputTokens) ??
+    0;
+  const cachedInputTokens =
+    usage?.cachedInputTokens ??
+    readFiniteNumber(input.usageJson?.cachedInputTokens) ??
+    0;
+  const outputTokens =
+    usage?.outputTokens ??
+    readFiniteNumber(input.usageJson?.outputTokens) ??
+    0;
+  const reasoningOutputTokens =
+    usage?.reasoningOutputTokens ??
+    readFiniteNumber(input.usageJson?.reasoningOutputTokens) ??
+    0;
+  const costUsd =
+    input.adapterResult?.costUsd ??
+    readFiniteNumber(input.usageJson?.costUsd);
+  const summary = truncateReportText(input.adapterResult?.summary);
+  const startedAt = input.run.startedAt ? new Date(input.run.startedAt) : null;
+  const durationSec = startedAt
+    ? Math.max(0, Math.round((input.finishedAt.getTime() - startedAt.getTime()) / 1000))
+    : null;
+  const materiality = inferRunMateriality({
+    status: input.status,
+    summary,
+    inputTokens,
+    outputTokens,
+    stdoutExcerpt: input.stdoutExcerpt,
+    stderrExcerpt: input.stderrExcerpt,
+  });
+
+  return {
+    schemaVersion: 1,
+    runId: input.run.id,
+    agentId: input.agent.id,
+    agentName: input.agent.name,
+    status: input.status,
+    outcome: input.outcome,
+    invocationSource: input.run.invocationSource,
+    triggerDetail: input.run.triggerDetail,
+    startedAt: startedAt ? startedAt.toISOString() : null,
+    finishedAt: input.finishedAt.toISOString(),
+    durationSec,
+    model: input.adapterResult?.model ?? readNonEmptyString(input.usageJson?.model),
+    provider: input.adapterResult?.provider ?? null,
+    billingType: input.adapterResult?.billingType ?? readNonEmptyString(input.usageJson?.billingType),
+    costUsd,
+    usage: {
+      inputTokens,
+      cachedInputTokens,
+      outputTokens,
+      reasoningOutputTokens,
+      totalTokens: inputTokens + cachedInputTokens + outputTokens + reasoningOutputTokens,
+    },
+    materialWork: materiality.materialWork,
+    noOp: materiality.materialWork === false,
+    noOpReason: materiality.noOpReason,
+    summary,
+    error: input.error ?? input.adapterResult?.errorMessage ?? null,
+    exitCode: input.adapterResult?.exitCode ?? null,
+    signal: input.adapterResult?.signal ?? null,
+    logBytes: input.logSummary?.bytes ?? input.run.logBytes ?? null,
+    logSha256: input.logSummary?.sha256 ?? input.run.logSha256 ?? null,
+    logCompressed: input.logSummary?.compressed ?? input.run.logCompressed ?? false,
+  };
+}
+
 export function resolveRuntimeSessionParamsForWorkspace(input: {
   agentId: string;
   previousSessionParams: Record<string, unknown> | null;
@@ -733,6 +897,7 @@ export function heartbeatService(db: Db) {
           errorCode: updated.errorCode ?? null,
           startedAt: updated.startedAt ? new Date(updated.startedAt).toISOString() : null,
           finishedAt: updated.finishedAt ? new Date(updated.finishedAt).toISOString() : null,
+          completionReport: readCompletionReport(updated.resultJson),
         },
       });
     }
@@ -842,6 +1007,7 @@ export function heartbeatService(db: Db) {
         errorCode: claimed.errorCode ?? null,
         startedAt: claimed.startedAt ? new Date(claimed.startedAt).toISOString() : null,
         finishedAt: claimed.finishedAt ? new Date(claimed.finishedAt).toISOString() : null,
+        completionReport: readCompletionReport(claimed.resultJson),
       },
     });
 
@@ -1330,12 +1496,26 @@ export function heartbeatService(db: Db) {
           ? ({
               ...(adapterResult.usage ?? {}),
               ...(adapterResult.costUsd != null ? { costUsd: adapterResult.costUsd } : {}),
+              ...(adapterResult.model ? { model: adapterResult.model } : {}),
               ...(adapterResult.billingType ? { billingType: adapterResult.billingType } : {}),
             } as Record<string, unknown>)
           : null;
+      const finishedAt = new Date();
+      const completionReport = buildCompletionReport({
+        agent,
+        run,
+        status,
+        outcome,
+        finishedAt,
+        adapterResult,
+        usageJson,
+        stdoutExcerpt,
+        stderrExcerpt,
+        logSummary,
+      });
 
       await setRunStatus(run.id, status, {
-        finishedAt: new Date(),
+        finishedAt,
         error:
           outcome === "succeeded"
             ? null
@@ -1351,7 +1531,11 @@ export function heartbeatService(db: Db) {
         exitCode: adapterResult.exitCode,
         signal: adapterResult.signal,
         usageJson,
-        resultJson: adapterResult.resultJson ?? null,
+        resultJson: mergeResultJsonWithReport({
+          resultJson: adapterResult.resultJson,
+          summary: completionReport.summary as string | null,
+          completionReport,
+        }),
         sessionIdAfter: nextSessionState.displayId ?? nextSessionState.legacySessionId,
         stdoutExcerpt,
         stderrExcerpt,
@@ -1375,6 +1559,7 @@ export function heartbeatService(db: Db) {
           payload: {
             status,
             exitCode: adapterResult.exitCode,
+            completionReport,
           },
         });
         await releaseIssueExecutionAndPromote(finalizedRun);
@@ -1418,10 +1603,27 @@ export function heartbeatService(db: Db) {
         }
       }
 
+      const finishedAt = new Date();
+      const completionReport = buildCompletionReport({
+        agent,
+        run,
+        status: "failed",
+        outcome: "failed",
+        finishedAt,
+        adapterResult: null,
+        usageJson: null,
+        stdoutExcerpt,
+        stderrExcerpt,
+        logSummary,
+        error: message,
+      });
       const failedRun = await setRunStatus(run.id, "failed", {
         error: message,
         errorCode: "adapter_failed",
-        finishedAt: new Date(),
+        finishedAt,
+        resultJson: {
+          completionReport,
+        },
         stdoutExcerpt,
         stderrExcerpt,
         logBytes: logSummary?.bytes,
@@ -1439,6 +1641,9 @@ export function heartbeatService(db: Db) {
           stream: "system",
           level: "error",
           message,
+          payload: {
+            completionReport,
+          },
         });
         await releaseIssueExecutionAndPromote(failedRun);
 

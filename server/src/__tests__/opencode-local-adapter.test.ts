@@ -53,6 +53,68 @@ describe("opencode_local parser", () => {
 });
 
 describe("opencode_local execute", () => {
+  it("adds completion-report instructions to the default prompt", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-reporting-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "opencode");
+    await fs.mkdir(workspace, { recursive: true });
+    await fs.writeFile(
+      commandPath,
+      [
+        "#!/usr/bin/env node",
+        "console.log(JSON.stringify({ type: 'text', part: { type: 'text', text: 'Completion Report: no material work.' } }));",
+        "process.exit(0);",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.chmod(commandPath, 0o755);
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = root;
+    const prompts: string[] = [];
+
+    try {
+      const result = await execute({
+        runId: "run-reporting",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "OpenCode Agent",
+          adapterType: "opencode_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          model: "openrouter/xiaomi/mimo-v2-flash",
+        },
+        context: {},
+        onLog: async () => {},
+        onMeta: async (meta) => {
+          if (meta.prompt) prompts.push(meta.prompt);
+        },
+      });
+
+      expect(result.summary).toContain("Completion Report");
+      expect(prompts[0]).toContain("Before finishing, write a concise Completion Report");
+      expect(prompts[0]).toContain("Cost-saving no-op reason");
+    } finally {
+      if (previousHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = previousHome;
+      }
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("estimates OpenRouter cost from current model pricing when OpenCode omits cost", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-pricing-"));
     const workspace = path.join(root, "workspace");

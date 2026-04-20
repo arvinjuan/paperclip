@@ -215,7 +215,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const promptTemplate = asString(
     config.promptTemplate,
-    "You are agent {{agent.id}} ({{agent.name}}). Continue your Paperclip work.",
+    [
+      "You are agent {{agent.id}} ({{agent.name}}). Continue your Paperclip work.",
+      "",
+      "Before finishing, write a concise Completion Report that states:",
+      "- Trigger/source and what you checked",
+      "- Concrete work performed, including files changed, commits, PRs, issues, deploys, or external actions",
+      "- Validation run and results",
+      "- Cost-saving no-op reason if you made no material change",
+      "- Next step or owner, if any",
+      "",
+      "If this wakeup is only a heartbeat or there is no useful work to perform, say that explicitly.",
+    ].join("\n"),
   );
   const command = asString(config.command, "opencode");
   const model = asString(config.model, DEFAULT_OPENCODE_LOCAL_MODEL);
