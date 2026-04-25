@@ -3,6 +3,7 @@ import { resolveDefaultAgentWorkspaceDir } from "../home-paths.js";
 import {
   resolveRuntimeSessionParamsForWorkspace,
   shouldResetTaskSessionForWake,
+  synthesizeCompletionReportForPersistedRun,
   type ResolvedWorkspaceForRun,
 } from "../services/heartbeat.ts";
 
@@ -139,5 +140,113 @@ describe("shouldResetTaskSessionForWake", () => {
         wakeTriggerDetail: "callback",
       }),
     ).toBe(false);
+  });
+});
+
+describe("synthesizeCompletionReportForPersistedRun", () => {
+  it("hydrates a persisted succeeded run without a stored completion report", () => {
+    const run = {
+      id: "run-1",
+      companyId: "company-1",
+      agentId: "agent-1",
+      invocationSource: "on_demand",
+      triggerDetail: "manual",
+      status: "succeeded",
+      startedAt: new Date("2026-04-25T12:00:00.000Z"),
+      finishedAt: new Date("2026-04-25T12:02:30.000Z"),
+      error: null,
+      wakeupRequestId: null,
+      exitCode: 0,
+      signal: null,
+      usageJson: {
+        costUsd: 0.0123,
+        model: "openrouter/xiaomi/mimo-v2-flash",
+        billingType: "api",
+        inputTokens: 1200,
+        outputTokens: 300,
+        cachedInputTokens: 400,
+        reasoningOutputTokens: 50,
+      },
+      resultJson: {},
+      sessionIdBefore: null,
+      sessionIdAfter: null,
+      logStore: null,
+      logRef: null,
+      logBytes: 1234,
+      logSha256: "abc",
+      logCompressed: false,
+      stdoutExcerpt: "Implemented the timeout fix and tests passed locally.",
+      stderrExcerpt: "",
+      errorCode: null,
+      externalRunId: null,
+      contextSnapshot: {},
+      createdAt: new Date("2026-04-25T12:00:00.000Z"),
+      updatedAt: new Date("2026-04-25T12:02:30.000Z"),
+    } as const;
+
+    const report = synthesizeCompletionReportForPersistedRun(run);
+
+    expect(report).toMatchObject({
+      runId: "run-1",
+      status: "succeeded",
+      outcome: "succeeded",
+      model: "openrouter/xiaomi/mimo-v2-flash",
+      billingType: "api",
+      costUsd: 0.0123,
+      materialWork: true,
+      noOp: false,
+      summary: "Implemented the timeout fix and tests passed locally.",
+      durationSec: 150,
+    });
+    expect(report?.usage).toMatchObject({
+      inputTokens: 1200,
+      outputTokens: 300,
+      cachedInputTokens: 400,
+      reasoningOutputTokens: 50,
+      totalTokens: 1950,
+    });
+  });
+
+  it("marks a token-free succeeded heartbeat as a no-op", () => {
+    const run = {
+      id: "run-2",
+      companyId: "company-1",
+      agentId: "agent-1",
+      invocationSource: "timer",
+      triggerDetail: "system",
+      status: "succeeded",
+      startedAt: new Date("2026-04-25T12:00:00.000Z"),
+      finishedAt: new Date("2026-04-25T12:00:05.000Z"),
+      error: null,
+      wakeupRequestId: null,
+      exitCode: 0,
+      signal: null,
+      usageJson: {},
+      resultJson: null,
+      sessionIdBefore: null,
+      sessionIdAfter: null,
+      logStore: null,
+      logRef: null,
+      logBytes: null,
+      logSha256: null,
+      logCompressed: false,
+      stdoutExcerpt: "",
+      stderrExcerpt: "",
+      errorCode: null,
+      externalRunId: null,
+      contextSnapshot: {},
+      createdAt: new Date("2026-04-25T12:00:00.000Z"),
+      updatedAt: new Date("2026-04-25T12:00:05.000Z"),
+    } as const;
+
+    const report = synthesizeCompletionReportForPersistedRun(run);
+
+    expect(report).toMatchObject({
+      status: "succeeded",
+      noOp: true,
+      materialWork: false,
+      noOpReason: "Run completed without token usage or final summary.",
+      durationSec: 5,
+    });
   });
 });

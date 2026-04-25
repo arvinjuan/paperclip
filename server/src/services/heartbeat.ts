@@ -176,6 +176,129 @@ function readCompletionReport(resultJson: Record<string, unknown> | null | undef
   return Object.keys(completionReport).length > 0 ? completionReport : null;
 }
 
+function summarizePersistedRunText(text: string | null | undefined) {
+  const source = text?.replace(/\u001b\[[0-9;]*m/g, "").replace(/\r/g, "\n") ?? "";
+  if (!source.trim()) return null;
+
+  const lines = source
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => line.length <= 240)
+    .filter((line) => !/^(diff --git|index |@@|--- |\+\+\+ |[{[]|[}\]],?$|".*":|\+{3,}|-{3,})/.test(line));
+
+  if (lines.length === 0) return null;
+
+  const signalPattern =
+    /\b(passed|verified|fixed|implemented|updated|added|removed|created|committed|pushed|completed|deployed|timed out|failed|error|no[- ]?op|nothing to do|no changes|summary)\b/i;
+  const signalLines = lines.filter((line) => signalPattern.test(line));
+  const chosen = signalLines.length > 0 ? signalLines.slice(-2) : lines.slice(-1);
+  const summary = truncateReportText(chosen.join(" "));
+  if (!summary) return null;
+  if (summary.includes("\\\"") || summary.includes("\\n")) return null;
+  return summary;
+}
+
+function isTerminalRunStatus(status: string | null | undefined) {
+  return status === "succeeded" || status === "failed" || status === "cancelled" || status === "timed_out";
+}
+
+function outcomeFromStatus(status: string | null | undefined): "succeeded" | "failed" | "cancelled" | "timed_out" {
+  if (status === "cancelled") return "cancelled";
+  if (status === "timed_out") return "timed_out";
+  if (status === "failed") return "failed";
+  return "succeeded";
+}
+
+export function synthesizeCompletionReportForPersistedRun(
+  run: typeof heartbeatRuns.$inferSelect,
+  opts?: { agentName?: string | null },
+) {
+  const existing = readCompletionReport(run.resultJson);
+  if (existing) return existing;
+  if (!isTerminalRunStatus(run.status)) return null;
+
+  const usageJson = parseObject(run.usageJson);
+  const resultJson = parseObject(run.resultJson);
+  const inputTokens = readFiniteNumber(usageJson.inputTokens) ?? 0;
+  const cachedInputTokens = readFiniteNumber(usageJson.cachedInputTokens) ?? 0;
+  const outputTokens = readFiniteNumber(usageJson.outputTokens) ?? 0;
+  const reasoningOutputTokens = readFiniteNumber(usageJson.reasoningOutputTokens) ?? 0;
+  const startedAt = run.startedAt ? new Date(run.startedAt) : null;
+  const finishedAt = run.finishedAt ? new Date(run.finishedAt) : null;
+  const summary = truncateReportText(
+    readNonEmptyString(resultJson.summary) ??
+      (run.status === "succeeded"
+        ? summarizePersistedRunText(run.stdoutExcerpt) ?? summarizePersistedRunText(run.stderrExcerpt)
+        : readNonEmptyString(run.error) ??
+            summarizePersistedRunText(run.stderrExcerpt) ??
+            summarizePersistedRunText(run.stdoutExcerpt)),
+  );
+  const materiality = inferRunMateriality({
+    status: run.status,
+    summary,
+    inputTokens,
+    outputTokens,
+    stdoutExcerpt: run.stdoutExcerpt ?? "",
+    stderrExcerpt: run.stderrExcerpt ?? "",
+  });
+
+  return {
+    schemaVersion: 1,
+    runId: run.id,
+    agentId: run.agentId,
+    agentName: opts?.agentName ?? null,
+    status: run.status,
+    outcome: outcomeFromStatus(run.status),
+    invocationSource: run.invocationSource,
+    triggerDetail: run.triggerDetail,
+    startedAt: startedAt ? startedAt.toISOString() : null,
+    finishedAt: finishedAt ? finishedAt.toISOString() : null,
+    durationSec:
+      startedAt && finishedAt
+        ? Math.max(0, Math.round((finishedAt.getTime() - startedAt.getTime()) / 1000))
+        : null,
+    model: readNonEmptyString(usageJson.model),
+    provider: null,
+    billingType: readNonEmptyString(usageJson.billingType),
+    costUsd: readFiniteNumber(usageJson.costUsd),
+    usage: {
+      inputTokens,
+      cachedInputTokens,
+      outputTokens,
+      reasoningOutputTokens,
+      totalTokens: inputTokens + cachedInputTokens + outputTokens + reasoningOutputTokens,
+    },
+    materialWork: materiality.materialWork,
+    noOp: materiality.materialWork === false,
+    noOpReason: materiality.noOpReason,
+    summary,
+    error: run.error ?? null,
+    exitCode: run.exitCode ?? null,
+    signal: run.signal ?? null,
+    logBytes: run.logBytes ?? null,
+    logSha256: run.logSha256 ?? null,
+    logCompressed: run.logCompressed ?? false,
+  };
+}
+
+function hydrateRunCompletionReport(
+  run: typeof heartbeatRuns.$inferSelect | null,
+  opts?: { agentName?: string | null },
+) {
+  if (!run) return run;
+  const completionReport = synthesizeCompletionReportForPersistedRun(run, opts);
+  if (!completionReport) return run;
+  return {
+    ...run,
+    resultJson: mergeResultJsonWithReport({
+      resultJson: parseObject(run.resultJson),
+      summary: truncateReportText(readNonEmptyString(completionReport.summary)),
+      completionReport,
+    }),
+  };
+}
+
 function buildCompletionReport(input: {
   agent: typeof agents.$inferSelect;
   run: typeof heartbeatRuns.$inferSelect;
@@ -585,7 +708,7 @@ export function heartbeatService(db: Db) {
       .select()
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
-      .then((rows) => rows[0] ?? null);
+      .then((rows) => hydrateRunCompletionReport(rows[0] ?? null));
   }
 
   async function getRuntimeState(agentId: string) {
@@ -876,9 +999,52 @@ export function heartbeatService(db: Db) {
     status: string,
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
   ) {
+    const existing = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    let patchWithCompletionReport = patch;
+
+    if (existing && isTerminalRunStatus(status)) {
+      const baseResultJson =
+        patch?.resultJson !== undefined ? parseObject(patch.resultJson) : parseObject(existing.resultJson);
+      const incomingCompletionReport = readCompletionReport(baseResultJson);
+      if (!incomingCompletionReport) {
+        const syntheticCompletionReport = synthesizeCompletionReportForPersistedRun(
+          {
+            ...existing,
+            ...patch,
+            status,
+            finishedAt: patch?.finishedAt ?? existing.finishedAt ?? new Date(),
+            usageJson: patch?.usageJson ?? existing.usageJson,
+            resultJson: baseResultJson,
+            stdoutExcerpt: patch?.stdoutExcerpt ?? existing.stdoutExcerpt,
+            stderrExcerpt: patch?.stderrExcerpt ?? existing.stderrExcerpt,
+            error: patch?.error ?? existing.error,
+            exitCode: patch?.exitCode ?? existing.exitCode,
+            signal: patch?.signal ?? existing.signal,
+            logBytes: patch?.logBytes ?? existing.logBytes,
+            logSha256: patch?.logSha256 ?? existing.logSha256,
+            logCompressed: patch?.logCompressed ?? existing.logCompressed,
+          } as typeof heartbeatRuns.$inferSelect,
+        );
+        if (syntheticCompletionReport) {
+          patchWithCompletionReport = {
+            ...patch,
+            resultJson: mergeResultJsonWithReport({
+              resultJson: baseResultJson,
+              summary: truncateReportText(readNonEmptyString(syntheticCompletionReport.summary)),
+              completionReport: syntheticCompletionReport,
+            }),
+          };
+        }
+      }
+    }
+
     const updated = await db
       .update(heartbeatRuns)
-      .set({ status, ...patch, updatedAt: new Date() })
+      .set({ status, ...patchWithCompletionReport, updatedAt: new Date() })
       .where(eq(heartbeatRuns.id, runId))
       .returning()
       .then((rows) => rows[0] ?? null);
@@ -897,7 +1063,7 @@ export function heartbeatService(db: Db) {
           errorCode: updated.errorCode ?? null,
           startedAt: updated.startedAt ? new Date(updated.startedAt).toISOString() : null,
           finishedAt: updated.finishedAt ? new Date(updated.finishedAt).toISOString() : null,
-          completionReport: readCompletionReport(updated.resultJson),
+          completionReport: synthesizeCompletionReportForPersistedRun(updated),
         },
       });
     }
@@ -1367,8 +1533,8 @@ export function heartbeatService(db: Db) {
       });
 
       handle = await runLogStore.begin({
-        companyId: run.companyId,
-        agentId: run.agentId,
+        companyId: currentRun.companyId,
+        agentId: currentRun.agentId,
         runId,
       });
 
@@ -1399,11 +1565,11 @@ export function heartbeatService(db: Db) {
             : chunk;
 
         publishLiveEvent({
-          companyId: run.companyId,
+          companyId: currentRun.companyId,
           type: "heartbeat.run.log",
           payload: {
-            runId: run.id,
-            agentId: run.agentId,
+            runId: currentRun.id,
+            agentId: currentRun.agentId,
             stream,
             chunk: payloadChunk,
             truncated: payloadChunk.length !== chunk.length,
@@ -2297,9 +2463,9 @@ export function heartbeatService(db: Db) {
         .orderBy(desc(heartbeatRuns.createdAt));
 
       if (limit) {
-        return query.limit(limit);
+        return query.limit(limit).then((rows) => rows.map((run) => hydrateRunCompletionReport(run)));
       }
-      return query;
+      return query.then((rows) => rows.map((run) => hydrateRunCompletionReport(run)));
     },
 
     getRun,
