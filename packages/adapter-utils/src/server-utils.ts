@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { constants as fsConstants, promises as fs } from "node:fs";
 import path from "node:path";
 
@@ -10,8 +10,13 @@ export interface RunProcessResult {
   stderr: string;
 }
 
+type SpawnedChildProcess = ReturnType<typeof spawn> & {
+  on(event: "error", listener: (err: Error) => void): unknown;
+  on(event: "close", listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
+};
+
 interface RunningProcess {
-  child: ChildProcess;
+  child: SpawnedChildProcess;
   graceSec: number;
 }
 
@@ -217,7 +222,7 @@ export async function runChildProcess(
       env: mergedEnv,
       shell: false,
       stdio: [opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
-    });
+    }) as SpawnedChildProcess;
 
     if (opts.stdin != null && child.stdin) {
       child.stdin.write(opts.stdin);
@@ -260,7 +265,7 @@ export async function runChildProcess(
         .catch((err) => onLogError(err, runId, "failed to append stderr log chunk"));
     });
 
-    child.on("error", (err) => {
+    child.on("error", (err: Error) => {
       if (timeout) clearTimeout(timeout);
       runningProcesses.delete(runId);
       const errno = (err as NodeJS.ErrnoException).code;
@@ -272,7 +277,7 @@ export async function runChildProcess(
       reject(new Error(msg));
     });
 
-    child.on("close", (code, signal) => {
+    child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       if (timeout) clearTimeout(timeout);
       runningProcesses.delete(runId);
       void logChain.finally(() => {

@@ -11,6 +11,12 @@
     "sourceMap": true,
     "outDir": "dist",
     "rootDir": "src",
+    "typeRoots": [
+      "./types",
+      "./cli/node_modules/@types",
+      "./server/node_modules/@types",
+      "./ui/node_modules/@types"
+    ],
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "isolatedModules": true
